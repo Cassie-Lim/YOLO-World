@@ -132,7 +132,7 @@ train_dataloader = dict(batch_size=train_batch_size_per_gpu,
                                      ignore_keys=['classes', 'palette']))
 
 test_pipeline = [
-    dict(type='LoadImageFromFile'),
+    # dict(type='LoadImageFromFile'),
     dict(type='YOLOv5KeepRatioResize', scale=img_scale),
     dict(
         type='LetterResize',
