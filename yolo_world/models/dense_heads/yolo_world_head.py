@@ -23,7 +23,9 @@ from mmyolo.models.dense_heads import YOLOv8HeadModule, YOLOv8Head
 from mmyolo.models.utils import gt_instances_preprocess
 from mmcv.cnn.bricks import build_norm_layer
 
-
+# from mmdet.structures.bbox import (cat_boxes, get_box_tensor, get_box_wh,
+#                                    scale_boxes)
+# from mmcv.ops import batched_nms
 @MODELS.register_module()
 class ContrastiveHead(BaseModule):
     """Contrastive Head for YOLO-World
@@ -252,8 +254,9 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         """Forward features from the upstream network."""
         assert len(img_feats) == self.num_levels
         txt_feats = [txt_feats for _ in range(self.num_levels)]
-        return multi_apply(self.forward_single, img_feats, txt_feats,
+        results = multi_apply(self.forward_single, img_feats, txt_feats,
                            self.cls_preds, self.reg_preds, self.cls_contrasts)
+        return results
 
     def forward_single(self, img_feat: Tensor, txt_feat: Tensor,
                        cls_pred: nn.ModuleList, reg_pred: nn.ModuleList,
@@ -261,7 +264,9 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         """Forward feature of a single scale level."""
         b, _, h, w = img_feat.shape
         cls_embed = cls_pred(img_feat)
+        print("img/txt/cls_embed shape", img_feat.shape, txt_feat.shape, cls_embed.shape)
         cls_logit = cls_contrast(cls_embed, txt_feat)
+        print("cls logit shape", cls_logit.shape)
         bbox_dist_preds = reg_pred(img_feat)
         if self.reg_max > 1:
             bbox_dist_preds = bbox_dist_preds.reshape(
@@ -275,10 +280,13 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
             bbox_preds = bbox_preds.transpose(1, 2).reshape(b, -1, h, w)
         else:
             bbox_preds = bbox_dist_preds
+        print("reg max", self.reg_max)
+        print("bbox list shape", bbox_dist_preds.shape)
+        print("bbox pred shape", bbox_preds.shape)
         if self.training:
             return cls_logit, bbox_preds, bbox_dist_preds
         else:
-            return cls_logit, bbox_preds
+            return cls_logit, bbox_preds, cls_embed
 
 
 @MODELS.register_module()
@@ -506,6 +514,7 @@ class YOLOWorldHead(YOLOv8Head):
     def predict_by_feat(self,
                         cls_scores: List[Tensor],
                         bbox_preds: List[Tensor],
+                        bbox_feats: List[Tensor],
                         objectnesses: Optional[List[Tensor]] = None,
                         batch_img_metas: Optional[List[dict]] = None,
                         cfg: Optional[ConfigDict] = None,
@@ -587,12 +596,15 @@ class YOLOWorldHead(YOLOv8Head):
             bbox_pred.permute(0, 2, 3, 1).reshape(num_imgs, -1, 4)
             for bbox_pred in bbox_preds
         ]
-
+        flatten_bbox_feats = [bbox_feat.permute(0, 2, 3, 1).reshape(num_imgs, -1, bbox_feat.size(1))
+                          for bbox_feat in bbox_feats]  # Process bbox_feats similarly
+        
         flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()
         flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
         flatten_decoded_bboxes = self.bbox_coder.decode(
             flatten_priors[None], flatten_bbox_preds, flatten_stride)
-
+        flatten_bbox_feats = torch.cat(flatten_bbox_feats, dim=1)  # Concatenate bbox_feats
+        
         if with_objectnesses:
             flatten_objectness = [
                 objectness.permute(0, 2, 3, 1).reshape(num_imgs, -1)
@@ -604,8 +616,8 @@ class YOLOWorldHead(YOLOv8Head):
         # 8400
         # print(flatten_cls_scores.shape)
         results_list = []
-        for (bboxes, scores, objectness,
-             img_meta) in zip(flatten_decoded_bboxes, flatten_cls_scores,
+        for (bboxes, scores, bbox_feats, objectness,
+             img_meta) in zip(flatten_decoded_bboxes, flatten_cls_scores, flatten_bbox_feats,
                               flatten_objectness, batch_img_metas):
             ori_shape = img_meta['ori_shape']
             scale_factor = img_meta['scale_factor']
@@ -621,6 +633,7 @@ class YOLOWorldHead(YOLOv8Head):
                 conf_inds = objectness > score_thr
                 bboxes = bboxes[conf_inds, :]
                 scores = scores[conf_inds, :]
+                bbox_feats = bbox_feats[conf_inds, :]
                 objectness = objectness[conf_inds]
 
             if objectness is not None:
@@ -632,6 +645,7 @@ class YOLOWorldHead(YOLOv8Head):
                 empty_results.bboxes = bboxes
                 empty_results.scores = scores[:, 0]
                 empty_results.labels = scores[:, 0].int()
+                empty_results.bbox_feats = bbox_feats
                 results_list.append(empty_results)
                 continue
 
@@ -650,7 +664,8 @@ class YOLOWorldHead(YOLOv8Head):
 
             results = InstanceData(scores=scores,
                                    labels=labels,
-                                   bboxes=bboxes[keep_idxs])
+                                   bboxes=bboxes[keep_idxs],
+                                   bbox_feats=bbox_feats[keep_idxs])
 
             if rescale:
                 if pad_param is not None:
@@ -674,3 +689,66 @@ class YOLOWorldHead(YOLOv8Head):
 
             results_list.append(results)
         return results_list
+    # def _bbox_post_process(self,
+    #                        results: InstanceData,
+    #                        cfg: ConfigDict,
+    #                        rescale: bool = False,
+    #                        with_nms: bool = True,
+    #                        img_meta: Optional[dict] = None) -> InstanceData:
+    #     """bbox post-processing method.
+
+    #     The boxes would be rescaled to the original image scale and do
+    #     the nms operation. Usually `with_nms` is False is used for aug test.
+
+    #     Args:
+    #         results (:obj:`InstaceData`): Detection instance results,
+    #             each item has shape (num_bboxes, ).
+    #         cfg (ConfigDict): Test / postprocessing configuration,
+    #             if None, test_cfg would be used.
+    #         rescale (bool): If True, return boxes in original image space.
+    #             Default to False.
+    #         with_nms (bool): If True, do nms before return boxes.
+    #             Default to True.
+    #         img_meta (dict, optional): Image meta info. Defaults to None.
+
+    #     Returns:
+    #         :obj:`InstanceData`: Detection results of each image
+    #         after the post process.
+    #         Each item usually contains following keys.
+
+    #             - scores (Tensor): Classification scores, has a shape
+    #               (num_instance, )
+    #             - labels (Tensor): Labels of bboxes, has a shape
+    #               (num_instances, ).
+    #             - bboxes (Tensor): Has a shape (num_instances, 4),
+    #               the last dimension 4 arrange as (x1, y1, x2, y2).
+    #     """
+    #     if rescale:
+    #         assert img_meta.get('scale_factor') is not None
+    #         scale_factor = [1 / s for s in img_meta['scale_factor']]
+    #         results.bboxes = scale_boxes(results.bboxes, scale_factor)
+
+    #     if hasattr(results, 'score_factors'):
+    #         # TODO: Add sqrt operation in order to be consistent with
+    #         #  the paper.
+    #         score_factors = results.pop('score_factors')
+    #         results.scores = results.scores * score_factors
+
+    #     # filter small size bboxes
+    #     if cfg.get('min_bbox_size', -1) >= 0:
+    #         w, h = get_box_wh(results.bboxes)
+    #         valid_mask = (w > cfg.min_bbox_size) & (h > cfg.min_bbox_size)
+    #         if not valid_mask.all():
+    #             results = results[valid_mask]
+
+    #     # TODO: deal with `with_nms` and `nms_cfg=None` in test_cfg
+    #     if with_nms and results.bboxes.numel() > 0:
+    #         bboxes = get_box_tensor(results.bboxes)
+    #         det_bboxes, keep_idxs = batched_nms(bboxes, results.scores,
+    #                                             results.labels, cfg.nms)
+    #         results = results[keep_idxs]
+    #         # some nms would reweight the score, such as softnms
+    #         results.scores = det_bboxes[:, -1]
+    #         results = results[:cfg.max_per_img]
+
+    #     return results
