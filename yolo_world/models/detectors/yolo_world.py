@@ -99,6 +99,16 @@ class YOLOWorldDetector(YOLODetector):
             else:
                 img_feats = self.neck(img_feats)
         return img_feats, txt_feats
+    def query_cls_embed(self, texts, cls_embed):
+        '''
+        cls_embed: of shape [1, 512, 1, 1]
+        '''
+        txt_feats = self.backbone.forward_text(texts)
+        # [1, 81, 1, 1]
+        cls_logit = self.backbone.bbox_head.cls_contrasts(cls_embed, txt_feats).reshape(-1).sigmoid()
+        scores, labels = cls_logit.max(keepdim=True)
+        return scores, labels
+        
 
 
 @MODELS.register_module()

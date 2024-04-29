@@ -284,7 +284,7 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         print("bbox list shape", bbox_dist_preds.shape)
         print("bbox pred shape", bbox_preds.shape)
         if self.training:
-            return cls_logit, bbox_preds, bbox_dist_preds
+            return cls_logit, bbox_preds, cls_embed, bbox_dist_preds
         else:
             return cls_logit, bbox_preds, cls_embed
 
