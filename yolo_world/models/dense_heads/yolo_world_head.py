@@ -108,7 +108,36 @@ class BNContrastiveHead(BaseModule):
 
         x = x * self.logit_scale.exp() + self.bias
         return x
-
+    def normalize_flattened(self, x, mean=None, var=None):
+        # used for test time only
+        # TODO: use mean & var
+        if self.norm.momentum is None:
+            exponential_average_factor = 0.0
+        else:
+            exponential_average_factor = self.norm.momentum
+        F.batch_norm(
+            x,
+            # If buffers are not to be tracked, ensure that they won't be updated
+            self.norm.running_mean,
+            self.norm.running_var,
+            self.norm.weight,
+            self.norm.bias,
+            False,
+            exponential_average_factor,
+            self.norm.eps,
+        )
+        return x
+    def forward_flattened(self, x: Tensor, w: Tensor, mean=None, var=None) -> Tensor:
+        x = self.normalize_flattened(x)
+        w = w.reshape(-1, w.shape[-1])
+        w = F.normalize(w, dim=-1, p=2)
+        if self.use_einsum:
+            # x = torch.einsum('bcn,bkc->bkn', x, w)
+            x = torch.einsum('nc,kc->kn', x, w)
+        else:
+            x = torch.matmul(x, w.squeeze().T)
+        x = x * self.logit_scale.exp() + self.bias
+        return x
 
 @MODELS.register_module()
 class RepBNContrastiveHead(BaseModule):
@@ -264,9 +293,9 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         """Forward feature of a single scale level."""
         b, _, h, w = img_feat.shape
         cls_embed = cls_pred(img_feat)
-        print("img/txt/cls_embed shape", img_feat.shape, txt_feat.shape, cls_embed.shape)
+        # print("img/txt/cls_embed shape", img_feat.shape, txt_feat.shape, cls_embed.shape)
         cls_logit = cls_contrast(cls_embed, txt_feat)
-        print("cls logit shape", cls_logit.shape)
+        # print("cls logit shape", cls_logit.shape)
         bbox_dist_preds = reg_pred(img_feat)
         if self.reg_max > 1:
             bbox_dist_preds = bbox_dist_preds.reshape(
@@ -280,9 +309,9 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
             bbox_preds = bbox_preds.transpose(1, 2).reshape(b, -1, h, w)
         else:
             bbox_preds = bbox_dist_preds
-        print("reg max", self.reg_max)
-        print("bbox list shape", bbox_dist_preds.shape)
-        print("bbox pred shape", bbox_preds.shape)
+        # print("reg max", self.reg_max)
+        # print("bbox list shape", bbox_dist_preds.shape)
+        # print("bbox pred shape", bbox_preds.shape)
         if self.training:
             return cls_logit, bbox_preds, cls_embed, bbox_dist_preds
         else:

@@ -103,7 +103,7 @@ class YOLOWorldDetector(YOLODetector):
         '''
         Args:
             texts: Input texts associated with the classes.
-            cls_embed: Tensor of shape [1, 512, h, w] representing class embeddings.
+            cls_embed: Tensor of shape [1, 512, h, w] representing class embeddings for each pixel.
         Returns:
             scores, labels: Both are numpy arrays where scores give the confidence and
             labels provide the class label, both with the shape [h, w].
@@ -112,16 +112,18 @@ class YOLOWorldDetector(YOLODetector):
         cls_logits = []
         for cls_contrast in self.bbox_head.head_module.cls_contrasts:
             # Expecting [1, num_classes, h, w]
-            cls_logit = cls_contrast(cls_embed, txt_feats)
-            cls_logits.append(cls_logit.sigmoid())
+            # cls_logit = cls_contrast.forward(cls_embed, txt_feats)
+            cls_logit = cls_contrast.forward_flattened(cls_embed, txt_feats)
+            cls_logits.append(cls_logit.unsqueeze(0).sigmoid())
 
         # Average logits across different contrasts
-        cls_logit = torch.stack(cls_logits, dim=0).mean(dim=0).squeeze(0)  # Shape should be [num_classes, h, w]
+        cls_logit = torch.stack(cls_logits, dim=0).mean(dim=0).squeeze(0) # Shape should be [num_classes, h, w]
         
         # Compute max along classes dimension to find the class label with highest confidence per pixel
         scores, labels = torch.max(cls_logit, dim=0)  # Now scores and labels should both have shape [h, w]
         
-        return scores.cpu().numpy(), labels.cpu().numpy()
+        return scores, labels
+        # return scores.cpu().numpy(), labels.cpu().numpy()
 
         
 
