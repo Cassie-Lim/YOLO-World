@@ -108,26 +108,50 @@ class BNContrastiveHead(BaseModule):
 
         x = x * self.logit_scale.exp() + self.bias
         return x
-    def normalize_flattened(self, x, mean=None, var=None):
+    # def normalize_flattened(self, x, mean=None, var=None):
+    #     # used for test time only
+    #     # TODO: use mean & var
+    #     if self.norm.momentum is None:
+    #         exponential_average_factor = 0.0
+    #     else:
+    #         exponential_average_factor = self.norm.momentum
+    #     F.batch_norm(
+    #         x,
+    #         # If buffers are not to be tracked, ensure that they won't be updated
+    #         self.norm.running_mean,
+    #         self.norm.running_var,
+    #         self.norm.weight,
+    #         self.norm.bias,
+    #         False,
+    #         exponential_average_factor,
+    #         self.norm.eps,
+    #     )
+    #     return x
+    def normalize_flattened(self, x: Tensor, mean: Tensor = None, var: Tensor = None) -> Tensor:
         # used for test time only
-        # TODO: use mean & var
-        if self.norm.momentum is None:
-            exponential_average_factor = 0.0
-        else:
-            exponential_average_factor = self.norm.momentum
-        F.batch_norm(
-            x,
-            # If buffers are not to be tracked, ensure that they won't be updated
-            self.norm.running_mean,
-            self.norm.running_var,
-            self.norm.weight,
-            self.norm.bias,
-            False,
-            exponential_average_factor,
-            self.norm.eps,
-        )
+        if mean is None or var is None:
+            mean = self.norm.running_mean
+            var = self.norm.running_var
+
+        # Normalize using the provided mean and variance
+        x = (x - mean[None, :]) / torch.sqrt(var[None, :] + self.norm.eps)
+        if self.norm.weight is not None:
+            x = x * self.norm.weight[None, :]
+        if self.norm.bias is not None:
+            x = x + self.norm.bias[None, :]
+        
         return x
+    
+        
     def forward_flattened(self, x: Tensor, w: Tensor, mean=None, var=None) -> Tensor:
+        # For debugging purposes: test_x = self.norm(x), tmp_x = torch.einsum('nc,kc->kn', x, w)
+        # tmp = x.T.reshape(1, 512, 640, -1)
+        # tmp = self.norm(tmp)
+        # test_x = tmp.reshape(512, -1).T
+        
+        # tmp_w = w.reshape(1, -1, 512)
+        # tmp_res = torch.einsum('bchw,bkc->bkhw', tmp, tmp_w)
+        # tmp_x = tmp_res.reshape(-1, x.shape[0])
         x = self.normalize_flattened(x)
         w = w.reshape(-1, w.shape[-1])
         w = F.normalize(w, dim=-1, p=2)

@@ -108,7 +108,7 @@ class YOLOWorldDetector(YOLODetector):
             scores, labels: Both are numpy arrays where scores give the confidence and
             labels provide the class label, both with the shape [h, w].
         '''
-        txt_feats = self.backbone.forward_text(texts)
+        txt_feats = self.backbone.forward_text(texts)   # (35, 1, 512)
         cls_logits = []
         for cls_contrast in self.bbox_head.head_module.cls_contrasts:
             # Expecting [1, num_classes, h, w]
