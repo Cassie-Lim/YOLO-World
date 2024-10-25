@@ -122,7 +122,7 @@ class YOLOWorldDetector(YOLODetector):
         # Compute max along classes dimension to find the class label with highest confidence per pixel
         scores, labels = torch.max(cls_logit, dim=0)  # Now scores and labels should both have shape [h, w]
         
-        return scores, labels
+        return scores, labels, cls_logit
         # return scores.cpu().numpy(), labels.cpu().numpy()
 
         
