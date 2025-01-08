@@ -102,13 +102,16 @@ class YOLOWorldDetector(YOLODetector):
     def query_cls_embed(self, texts, cls_embed):
         '''
         Args:
-            texts: Input texts associated with the classes.
+            texts: Input texts associated with the classes. [or image features]
             cls_embed: Tensor of shape [1, 512, h, w] representing class embeddings for each pixel.
         Returns:
             scores, labels: Both are numpy arrays where scores give the confidence and
             labels provide the class label, both with the shape [h, w].
         '''
-        txt_feats = self.backbone.forward_text(texts)   # (35, 1, 512)
+        if isinstance(texts, list):
+            txt_feats = self.backbone.forward_text(texts)   # (35, 1, 512)
+        else:
+            txt_feats = texts.reshape(-1, 1, texts.shape[-1])
         cls_logits = []
         for cls_contrast in self.bbox_head.head_module.cls_contrasts:
             # Expecting [1, num_classes, h, w]
