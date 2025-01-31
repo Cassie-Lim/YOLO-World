@@ -130,6 +130,7 @@ test_pipeline = [
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                     'scale_factor', 'pad_param', 'texts'))
 ]
+test_pipeline = test_pipeline[1:]
 coco_val_dataset = dict(
     _delete_=True,
     type='MultiModalDataset',
