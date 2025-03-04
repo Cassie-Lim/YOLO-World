@@ -1,5 +1,6 @@
 # Copyright (c) Tencent Inc. All rights reserved.
 from typing import List, Tuple, Union
+from numpy import isin
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -99,7 +100,7 @@ class YOLOWorldDetector(YOLODetector):
             else:
                 img_feats = self.neck(img_feats)
         return img_feats, txt_feats
-    def query_cls_embed(self, texts, cls_embed):
+    def query_cls_embed(self, texts, cls_embed, scale_logits=None, consider_uncertainty=False):
         '''
         Args:
             texts: Input texts associated with the classes. [or image features]
@@ -109,7 +110,8 @@ class YOLOWorldDetector(YOLODetector):
             labels provide the class label, both with the shape [h, w].
         '''
         if isinstance(texts, list):
-            txt_feats = self.backbone.forward_text(texts)   # (35, 1, 512)
+            assert isinstance(texts[0], str)
+            txt_feats = self.backbone.forward_text([texts]) # [1, num_classes, 512]
         else:
             txt_feats = texts.reshape(-1, 1, texts.shape[-1])
         cls_logits = []
@@ -117,10 +119,22 @@ class YOLOWorldDetector(YOLODetector):
             # Expecting [1, num_classes, h, w]
             # cls_logit = cls_contrast.forward(cls_embed, txt_feats)
             cls_logit = cls_contrast.forward_flattened(cls_embed, txt_feats)
-            cls_logits.append(cls_logit.unsqueeze(0).sigmoid())
-
+            cls_logits.append(cls_logit.sigmoid())
+        # cls_logits = torch.stack(cls_logits, dim=0)
+        # stds = cls_logits.std(dim=(1,2,3))
+        # cls_logit = cls_logits[stds.argmax()].squeeze(0)
         # Average logits across different contrasts
-        cls_logit = torch.stack(cls_logits, dim=0).mean(dim=0).squeeze(0) # Shape should be [num_classes, h, w]
+        # cls_logit = cls_logits[1].squeeze(0)
+        if scale_logits is not None:
+            if consider_uncertainty:
+                cls_logits = cls_logits + [torch.zeros_like(cls_logits[0])]
+            else:
+                scale_logits = scale_logits[:, :-1] # remove the last uncertainty channel
+                scale_logits = scale_logits / (scale_logits.sum(dim=1, keepdim=True) + 1e-12) # normalize
+            scale_logits = scale_logits.permute(1, 0).unsqueeze(1)
+            cls_logit = (torch.stack(cls_logits, dim=0) * scale_logits).sum(dim=0)
+        else:
+            cls_logit = torch.stack(cls_logits, dim=0).mean(dim=0) # Shape should be [num_classes, h, w]
         
         # Compute max along classes dimension to find the class label with highest confidence per pixel
         scores, labels = torch.max(cls_logit, dim=0)  # Now scores and labels should both have shape [h, w]

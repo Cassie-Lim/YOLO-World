@@ -153,8 +153,8 @@ class BNContrastiveHead(BaseModule):
         # tmp_res = torch.einsum('bchw,bkc->bkhw', tmp, tmp_w)
         # tmp_x = tmp_res.reshape(-1, x.shape[0])
         x = self.normalize_flattened(x)
-        w = w.reshape(-1, w.shape[-1])
         w = F.normalize(w, dim=-1, p=2)
+        w = w.reshape(-1, w.shape[-1])
         if self.use_einsum:
             # x = torch.einsum('bcn,bkc->bkn', x, w)
             x = torch.einsum('nc,kc->kn', x, w)
@@ -651,12 +651,16 @@ class YOLOWorldHead(YOLOv8Head):
         ]
         flatten_bbox_feats = [bbox_feat.permute(0, 2, 3, 1).reshape(num_imgs, -1, bbox_feat.size(1))
                           for bbox_feat in bbox_feats]  # Process bbox_feats similarly
-        
+        flatten_bbox_feat_scales = [
+            torch.ones(flatten_bbox_feats[i].shape[:-1]).to(bbox_feats[0].device) *i for i in range(len(flatten_bbox_feats))
+        ]
+
         flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()
         flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
         flatten_decoded_bboxes = self.bbox_coder.decode(
             flatten_priors[None], flatten_bbox_preds, flatten_stride)
         flatten_bbox_feats = torch.cat(flatten_bbox_feats, dim=1)  # Concatenate bbox_feats
+        flatten_bbox_feat_scales = torch.cat(flatten_bbox_feat_scales, dim=1)  # Concatenate bbox_feat_scales
         
         if with_objectnesses:
             flatten_objectness = [
@@ -670,8 +674,8 @@ class YOLOWorldHead(YOLOv8Head):
         # print(flatten_cls_scores.shape)
         results_list = []
         for (bboxes, scores, bbox_feats, objectness,
-             img_meta) in zip(flatten_decoded_bboxes, flatten_cls_scores, flatten_bbox_feats,
-                              flatten_objectness, batch_img_metas):
+             img_meta, bbox_feat_scales) in zip(flatten_decoded_bboxes, flatten_cls_scores, flatten_bbox_feats,
+                              flatten_objectness, batch_img_metas, flatten_bbox_feat_scales):
             ori_shape = img_meta['ori_shape']
             scale_factor = img_meta['scale_factor']
             if 'pad_param' in img_meta:
@@ -687,6 +691,7 @@ class YOLOWorldHead(YOLOv8Head):
                 bboxes = bboxes[conf_inds, :]
                 scores = scores[conf_inds, :]
                 bbox_feats = bbox_feats[conf_inds, :]
+                bbox_feat_scales = bbox_feat_scales[conf_inds, :]
                 objectness = objectness[conf_inds]
 
             if objectness is not None:
@@ -699,6 +704,7 @@ class YOLOWorldHead(YOLOv8Head):
                 empty_results.scores = scores[:, 0]
                 empty_results.labels = scores[:, 0].int()
                 empty_results.bbox_feats = bbox_feats
+                empty_results.bbox_feat_scales = bbox_feat_scales
                 results_list.append(empty_results)
                 continue
 
@@ -718,7 +724,8 @@ class YOLOWorldHead(YOLOv8Head):
             results = InstanceData(scores=scores,
                                    labels=labels,
                                    bboxes=bboxes[keep_idxs],
-                                   bbox_feats=bbox_feats[keep_idxs])
+                                   bbox_feats=bbox_feats[keep_idxs],
+                                   bbox_feat_scales=bbox_feat_scales[keep_idxs])
 
             if rescale:
                 if pad_param is not None:
