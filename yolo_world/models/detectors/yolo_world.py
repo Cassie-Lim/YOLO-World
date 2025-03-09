@@ -100,7 +100,7 @@ class YOLOWorldDetector(YOLODetector):
             else:
                 img_feats = self.neck(img_feats)
         return img_feats, txt_feats
-    def query_cls_embed(self, texts, cls_embed, scale_logits=None, consider_uncertainty=False):
+    def query_cls_embed(self, texts, cls_embed, scale_logits=None, consider_uncertainty=False, pre_normalized=True):
         '''
         Args:
             texts: Input texts associated with the classes. [or image features]
@@ -118,7 +118,10 @@ class YOLOWorldDetector(YOLODetector):
         for cls_contrast in self.bbox_head.head_module.cls_contrasts:
             # Expecting [1, num_classes, h, w]
             # cls_logit = cls_contrast.forward(cls_embed, txt_feats)
-            cls_logit = cls_contrast.forward_flattened(cls_embed, txt_feats)
+            if pre_normalized:
+                cls_logit = cls_contrast.forward_no_normalization(cls_embed, txt_feats)
+            else:
+                cls_logit = cls_contrast.forward_flattened(cls_embed, txt_feats)
             cls_logits.append(cls_logit.sigmoid())
         # cls_logits = torch.stack(cls_logits, dim=0)
         # stds = cls_logits.std(dim=(1,2,3))
@@ -126,13 +129,13 @@ class YOLOWorldDetector(YOLODetector):
         # Average logits across different contrasts
         # cls_logit = cls_logits[1].squeeze(0)
         if scale_logits is not None:
-            if consider_uncertainty:
-                cls_logits = cls_logits + [torch.zeros_like(cls_logits[0])]
-            else:
-                scale_logits = scale_logits[:, :-1] # remove the last uncertainty channel
-                scale_logits = scale_logits / (scale_logits.sum(dim=1, keepdim=True) + 1e-12) # normalize
-            scale_logits = scale_logits.permute(1, 0).unsqueeze(1)
-            cls_logit = (torch.stack(cls_logits, dim=0) * scale_logits).sum(dim=0)
+            supvervised_mask = scale_logits[:, -1] < 0.5
+            scale_logits = scale_logits[:, :-1] # remove uncertainty channel
+            stacked_cls_logits = torch.stack(cls_logits, dim=0).permute(2, 0, 1)    # [num_contrasts, num_classes, num_vertexs] -> [num_vertexs, num_contrasts, num_classes]
+            scale_logits[supvervised_mask] = scale_logits[supvervised_mask] / (scale_logits[supvervised_mask].sum(dim=1, keepdim=True) + 1e-12) # normalize for supervised region
+            cls_logit = (stacked_cls_logits * scale_logits[..., None]).sum(dim=1).permute(1, 0) # [num_vertexs, num_classes] -> [num_classes, num_vertexs]
+            # scale_logits = scale_logits.permute(1, 0).unsqueeze(1)
+            # cls_logit = (torch.stack(cls_logits, dim=0) * scale_logits).sum(dim=0)
         else:
             cls_logit = torch.stack(cls_logits, dim=0).mean(dim=0) # Shape should be [num_classes, h, w]
         

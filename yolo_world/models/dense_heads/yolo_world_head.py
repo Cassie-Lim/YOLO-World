@@ -93,6 +93,7 @@ class BNContrastiveHead(BaseModule):
         """Forward function of contrastive learning."""
         x = self.norm(x)
         w = F.normalize(w, dim=-1, p=2)
+        feat_normalized = x * self.logit_scale.exp()
 
         if self.use_einsum:
             x = torch.einsum('bchw,bkc->bkhw', x, w)
@@ -107,7 +108,7 @@ class BNContrastiveHead(BaseModule):
             x = x.permute(0, 3, 1, 2)
 
         x = x * self.logit_scale.exp() + self.bias
-        return x
+        return x, feat_normalized
     # def normalize_flattened(self, x, mean=None, var=None):
     #     # used for test time only
     #     # TODO: use mean & var
@@ -162,7 +163,16 @@ class BNContrastiveHead(BaseModule):
             x = torch.matmul(x, w.squeeze().T)
         x = x * self.logit_scale.exp() + self.bias
         return x
-
+    def forward_no_normalization(self, x: Tensor, w: Tensor) -> Tensor:
+        w = F.normalize(w, dim=-1, p=2)
+        w = w.reshape(-1, w.shape[-1])
+        if self.use_einsum:
+            # x = torch.einsum('bcn,bkc->bkn', x, w)
+            x = torch.einsum('nc,kc->kn', x, w)
+        else:
+            x = torch.matmul(x, w.squeeze().T)
+        x = x + self.bias
+        return x
 @MODELS.register_module()
 class RepBNContrastiveHead(BaseModule):
     """ Batch Norm Contrastive Head for YOLO-World
@@ -318,7 +328,7 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         b, _, h, w = img_feat.shape
         cls_embed = cls_pred(img_feat)
         # print("img/txt/cls_embed shape", img_feat.shape, txt_feat.shape, cls_embed.shape)
-        cls_logit = cls_contrast(cls_embed, txt_feat)
+        cls_logit, normalized_cls_embed = cls_contrast(cls_embed, txt_feat)
         # print("cls logit shape", cls_logit.shape)
         bbox_dist_preds = reg_pred(img_feat)
         if self.reg_max > 1:
@@ -337,9 +347,9 @@ class YOLOWorldHeadModule(YOLOv8HeadModule):
         # print("bbox list shape", bbox_dist_preds.shape)
         # print("bbox pred shape", bbox_preds.shape)
         if self.training:
-            return cls_logit, bbox_preds, cls_embed, bbox_dist_preds
+            return cls_logit, bbox_preds, cls_embed, normalized_cls_embed, bbox_dist_preds
         else:
-            return cls_logit, bbox_preds, cls_embed
+            return cls_logit, bbox_preds, cls_embed, normalized_cls_embed
 
 
 @MODELS.register_module()
@@ -568,6 +578,7 @@ class YOLOWorldHead(YOLOv8Head):
                         cls_scores: List[Tensor],
                         bbox_preds: List[Tensor],
                         bbox_feats: List[Tensor],
+                        normalized_bbox_feats: List[Tensor],
                         objectnesses: Optional[List[Tensor]] = None,
                         batch_img_metas: Optional[List[dict]] = None,
                         cfg: Optional[ConfigDict] = None,
@@ -651,6 +662,8 @@ class YOLOWorldHead(YOLOv8Head):
         ]
         flatten_bbox_feats = [bbox_feat.permute(0, 2, 3, 1).reshape(num_imgs, -1, bbox_feat.size(1))
                           for bbox_feat in bbox_feats]  # Process bbox_feats similarly
+        flatten_normalized_bbox_feats = [normalized_bbox_feat.permute(0, 2, 3, 1).reshape(num_imgs, -1, normalized_bbox_feat.size(1))
+                          for normalized_bbox_feat in normalized_bbox_feats]  # Process bbox_feats similarly
         flatten_bbox_feat_scales = [
             torch.ones(flatten_bbox_feats[i].shape[:-1]).to(bbox_feats[0].device) *i for i in range(len(flatten_bbox_feats))
         ]
@@ -660,6 +673,7 @@ class YOLOWorldHead(YOLOv8Head):
         flatten_decoded_bboxes = self.bbox_coder.decode(
             flatten_priors[None], flatten_bbox_preds, flatten_stride)
         flatten_bbox_feats = torch.cat(flatten_bbox_feats, dim=1)  # Concatenate bbox_feats
+        flatten_normalized_bbox_feats = torch.cat(flatten_normalized_bbox_feats, dim=1)  # Concatenate normalized bbox_feats
         flatten_bbox_feat_scales = torch.cat(flatten_bbox_feat_scales, dim=1)  # Concatenate bbox_feat_scales
         
         if with_objectnesses:
@@ -673,8 +687,8 @@ class YOLOWorldHead(YOLOv8Head):
         # 8400
         # print(flatten_cls_scores.shape)
         results_list = []
-        for (bboxes, scores, bbox_feats, objectness,
-             img_meta, bbox_feat_scales) in zip(flatten_decoded_bboxes, flatten_cls_scores, flatten_bbox_feats,
+        for (bboxes, scores, bbox_feats, normalized_bbox_feats, objectness,
+             img_meta, bbox_feat_scales) in zip(flatten_decoded_bboxes, flatten_cls_scores, flatten_bbox_feats, flatten_normalized_bbox_feats,
                               flatten_objectness, batch_img_metas, flatten_bbox_feat_scales):
             ori_shape = img_meta['ori_shape']
             scale_factor = img_meta['scale_factor']
@@ -691,6 +705,7 @@ class YOLOWorldHead(YOLOv8Head):
                 bboxes = bboxes[conf_inds, :]
                 scores = scores[conf_inds, :]
                 bbox_feats = bbox_feats[conf_inds, :]
+                normalized_bbox_feats = normalized_bbox_feats[conf_inds, :]
                 bbox_feat_scales = bbox_feat_scales[conf_inds, :]
                 objectness = objectness[conf_inds]
 
@@ -704,6 +719,7 @@ class YOLOWorldHead(YOLOv8Head):
                 empty_results.scores = scores[:, 0]
                 empty_results.labels = scores[:, 0].int()
                 empty_results.bbox_feats = bbox_feats
+                empty_results.normalized_bbox_feats = bbox_feats
                 empty_results.bbox_feat_scales = bbox_feat_scales
                 results_list.append(empty_results)
                 continue
@@ -725,6 +741,7 @@ class YOLOWorldHead(YOLOv8Head):
                                    labels=labels,
                                    bboxes=bboxes[keep_idxs],
                                    bbox_feats=bbox_feats[keep_idxs],
+                                   normalized_bbox_feats=normalized_bbox_feats[keep_idxs],
                                    bbox_feat_scales=bbox_feat_scales[keep_idxs])
 
             if rescale:
